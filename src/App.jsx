@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 // No API key needed here anymore — it lives server-side in the Netlify function
@@ -101,14 +101,52 @@ const INSIGHT_QUESTIONS = [
   "What is our average deal size by industry vertical?",
 ];
 
-const SUMMARY_STATS = [
-  { label: "Total Opportunities", value: "847", sub: "all time" },
-  { label: "Win Rate", value: "34%", sub: "overall avg" },
-  { label: "Avg Deal Size", value: "£127K", sub: "managed SASE" },
-  { label: "Avg Sales Cycle", value: "94 days", sub: "close/won" },
-  { label: "Top Vendor", value: "Fortinet", sub: "by volume" },
-  { label: "At-Risk Deals", value: "23", sub: "need attention", alert: true },
-];
+// Computes dashboard summary cards from REAL uploaded/scored data.
+// Before any CSV is uploaded, shows neutral placeholders rather than
+// invented numbers. Win Rate / Avg Sales Cycle aren't shown as real metrics
+// here because the uploaded customer CSV has no opportunity-level win/loss
+// or deal-cycle data — showing them would mean fabricating figures. Instead
+// we surface two metrics that genuinely exist in the data once uploaded.
+function computeSummaryStats(rows, scored) {
+  if (!rows || rows.length === 0) {
+    return [
+      { label: "Total Customers", value: "—", sub: "upload a CSV" },
+      { label: "Avg Product Adoption", value: "—", sub: "upload a CSV" },
+      { label: "Avg Deal Size", value: "—", sub: "upload a CSV" },
+      { label: "Avg NPS Score", value: "—", sub: "upload a CSV" },
+      { label: "Top Vendor", value: "—", sub: "upload a CSV" },
+      { label: "At-Risk Deals", value: "—", sub: "score to see" },
+    ];
+  }
+
+  const nums = (key) => rows.map(r => Number(r[key])).filter(n => !isNaN(n));
+  const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+
+  const avgAdoption = avg(nums("product_adoption_rate"));
+  const avgDealSize = avg(nums("contract_value_gbp"));
+  const avgNps = avg(nums("nps_score"));
+
+  const vendorCounts = {};
+  rows.forEach(r => {
+    const v = r.primary_vendor;
+    if (v) vendorCounts[v] = (vendorCounts[v] || 0) + 1;
+  });
+  const topVendor = Object.entries(vendorCounts).sort((a, b) => b[1] - a[1])[0];
+
+  const atRisk = scored ? scored.filter(c => c.churn.churnProbability >= 60).length : null;
+
+  return [
+    { label: "Total Customers", value: String(rows.length), sub: "in uploaded CSV" },
+    { label: "Avg Product Adoption", value: `${avgAdoption.toFixed(0)}%`, sub: "across customer base" },
+    { label: "Avg Deal Size", value: `£${(avgDealSize / 1000).toFixed(0)}K`, sub: "annual contract value" },
+    { label: "Avg NPS Score", value: avgNps.toFixed(0), sub: "across customer base" },
+    { label: "Top Vendor", value: topVendor ? topVendor[0] : "—", sub: "by customer count" },
+    {
+      label: "At-Risk Deals", value: atRisk === null ? "—" : String(atRisk),
+      sub: atRisk === null ? "score to see" : "churn risk ≥60%", alert: true,
+    },
+  ];
+}
 
 // ─── Helper: minimal CSV parser (handles quoted fields, no external dep) ────
 function parseCSV(text) {
@@ -928,7 +966,7 @@ function ScoreGauge({ score }) {
   );
 }
 
-function ScoringTab() {
+function ScoringTab({ onRowsChange, onScoredChange }) {
   const [rows, setRows] = useState([]);
   const [fileName, setFileName] = useState("");
   const [isScoring, setIsScoring] = useState(false);
@@ -937,6 +975,9 @@ function ScoringTab() {
   const [error, setError] = useState(null);
   const [sortBy, setSortBy] = useState("churn");
   const fileInputRef = useRef(null);
+
+  useEffect(() => { onRowsChange?.(rows); }, [rows]);
+  useEffect(() => { onScoredChange?.(scored); }, [scored]);
 
   const handleFile = (file) => {
     if (!file) return;
@@ -1370,6 +1411,8 @@ export default function App() {
   const [selectedModels, setSelectedModels] = useState(["win_probability", "churn_risk", "upsell_propensity"]);
   const [conversation, setConversation] = useState([]);
   const [isAnalysing, setIsAnalysing] = useState(false);
+  const [scoringRows, setScoringRows] = useState([]);
+  const [scoringResults, setScoringResults] = useState(null);
 
   const toggleModel = (id) => {
     setSelectedModels(prev =>
@@ -1378,6 +1421,7 @@ export default function App() {
   };
 
   const insightCount = Math.floor(conversation.length / 2);
+  const summaryStats = computeSummaryStats(scoringRows, scoringResults);
 
   return (
     <div style={{ minHeight: "100vh", background: "var(--color-bg-tertiary)" }}>
@@ -1385,7 +1429,7 @@ export default function App() {
       <TabBar activeTab={activeTab} setActiveTab={setActiveTab} conversationCount={insightCount} />
 
       <div style={{ maxWidth: 1140, margin: "0 auto", padding: "1.75rem 2rem 3rem" }}>
-        <SummaryCards stats={SUMMARY_STATS} />
+        <SummaryCards stats={summaryStats} />
 
         {activeTab === "upload" && (
           <UploadTab
@@ -1411,7 +1455,9 @@ export default function App() {
             uploadedFiles={uploadedFiles}
           />
         )}
-        {activeTab === "scoring" && <ScoringTab />}
+        {activeTab === "scoring" && (
+          <ScoringTab onRowsChange={setScoringRows} onScoredChange={setScoringResults} />
+        )}
         {activeTab === "upsell" && <UpsellTab />}
       </div>
     </div>
