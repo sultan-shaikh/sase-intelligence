@@ -98,7 +98,19 @@ def main(csv_path):
     X, feature_names, encoder = build_features(df, numeric, binary, categorical)
     print(f"Total encoded feature vector length: {len(feature_names)}")
 
-    encoder_categories = {col: encoder.categories_[i].tolist() for i, col in enumerate(categorical)}
+    def clean_category(v):
+        # OneHotEncoder can include a literal float NaN as a category when the
+        # source column has missing values. Python's json module allows bare
+        # NaN by default, but that violates the JSON spec and browsers/Node's
+        # JSON.parse will reject it — replace with a safe string instead.
+        if isinstance(v, float) and v != v:  # NaN check without importing math
+            return "__missing__"
+        return v
+
+    encoder_categories = {
+        col: [clean_category(v) for v in encoder.categories_[i].tolist()]
+        for i, col in enumerate(categorical)
+    }
     shared_meta = {
         "feature_names": feature_names,
         "numeric_features": numeric,
@@ -117,7 +129,7 @@ def main(csv_path):
         sorted(zip(feature_names, churn_clf.feature_importances_.tolist()), key=lambda kv: -kv[1])[:15]
     )
     with open("ml/model_churn.json", "w") as f:
-        json.dump({**shared_meta, "model": churn_json}, f)
+        json.dump({**shared_meta, "model": churn_json}, f, allow_nan=False)
     print(f"Churn model trained. Base rate: {y_churn.mean():.1%}. "
           f"Top features: {list(churn_json['feature_importances'].items())[:5]}")
 
@@ -142,7 +154,7 @@ def main(csv_path):
         print(f"  {product}: base rate {y.mean():.1%}, top driver: {list(fj['feature_importances'].items())[0]}")
 
     with open("ml/model_upsell.json", "w") as f:
-        json.dump({**shared_meta, "models": upsell_models}, f)
+        json.dump({**shared_meta, "models": upsell_models}, f, allow_nan=False)
 
     print(f"\nTrained on {len(df)} customers.")
     print(f"Upsell models trained for: {list(upsell_models.keys())}")
