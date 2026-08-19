@@ -932,6 +932,7 @@ function ScoringTab() {
   const [rows, setRows] = useState([]);
   const [fileName, setFileName] = useState("");
   const [isScoring, setIsScoring] = useState(false);
+  const [scoringProgress, setScoringProgress] = useState("");
   const [scored, setScored] = useState(null);
   const [error, setError] = useState(null);
   const [sortBy, setSortBy] = useState("churn");
@@ -958,19 +959,33 @@ function ScoringTab() {
     if (rows.length === 0 || isScoring) return;
     setIsScoring(true);
     setError(null);
+    setScored(null);
+
+    const BATCH_SIZE = 200; // keeps each request well under Netlify's payload/timeout limits
+    const batches = [];
+    for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+      batches.push(rows.slice(i, i + BATCH_SIZE));
+    }
+
     try {
-      const response = await fetch("/.netlify/functions/score", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ records: rows }),
-      });
-      const data = await response.json();
-      if (data.error) throw new Error(data.error.message || "Scoring error");
-      setScored(data.scored);
+      const allScored = [];
+      for (let i = 0; i < batches.length; i++) {
+        setScoringProgress(`Scoring ${Math.min((i + 1) * BATCH_SIZE, rows.length)} of ${rows.length}…`);
+        const response = await fetch("/.netlify/functions/score", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ records: batches[i] }),
+        });
+        const data = await response.json();
+        if (data.error) throw new Error(`Batch ${i + 1}/${batches.length} failed: ${data.error.message || "Scoring error"}`);
+        allScored.push(...data.scored);
+      }
+      setScored(allScored);
     } catch (err) {
       setError(err.message);
     } finally {
       setIsScoring(false);
+      setScoringProgress("");
     }
   };
 
@@ -1013,7 +1028,7 @@ function ScoringTab() {
           color: isScoring ? "var(--color-text-tertiary)" : "white",
           border: "none", borderRadius: "var(--border-radius-md)", cursor: "pointer", marginBottom: "1.25rem",
         }}>
-          {isScoring ? "Scoring with Random Forest models…" : `Score ${rows.length} Customers →`}
+          {isScoring ? (scoringProgress || "Scoring with Random Forest models…") : `Score ${rows.length} Customers →`}
         </button>
       )}
 
