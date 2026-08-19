@@ -3,11 +3,7 @@
 // inference, so results are deterministic and reproducible.
 
 import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
 import { scoreChurn, scoreUpsell } from "./lib/forest.js";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let churnModel = null;
 let upsellModel = null;
@@ -15,12 +11,12 @@ let upsellModel = null;
 function loadModels() {
   if (!churnModel) {
     churnModel = JSON.parse(
-      fs.readFileSync(path.join(__dirname, "models", "model_churn.json"), "utf8")
+      fs.readFileSync(new URL("./models/model_churn.json", import.meta.url), "utf8")
     );
   }
   if (!upsellModel) {
     upsellModel = JSON.parse(
-      fs.readFileSync(path.join(__dirname, "models", "model_upsell.json"), "utf8")
+      fs.readFileSync(new URL("./models/model_upsell.json", import.meta.url), "utf8")
     );
   }
 }
