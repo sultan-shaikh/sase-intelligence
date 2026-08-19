@@ -1,9 +1,7 @@
 import { useState, useRef, useCallback } from "react";
 
 // ─── Configuration ────────────────────────────────────────────────────────────
-// Paste your Anthropic API key here, or set VITE_ANTHROPIC_API_KEY in a .env file
-const API_KEY = import.meta.env.VITE_ANTHROPIC_API_KEY || "YOUR_API_KEY_HERE";
-
+// (netlify/functions/analyze.js) and is never exposed to the browser.
 const VENDORS = ["Fortinet", "Palo Alto Networks", "Cisco", "Zscaler", "Cato Networks", "Versa Networks"];
 
 const STAGES = [
@@ -558,20 +556,18 @@ When responding:
     try {
       const messages = updatedConv.map(m => ({ role: m.role, content: m.content }));
 
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": API_KEY,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          system: systemPrompt,
-          messages,
-        }),
-      });
+      const response = await fetch("/.netlify/functions/analyze", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({
+    model: "claude-sonnet-4-6",
+    max_tokens: 1000,
+    system: systemPrompt,
+    messages,
+  }),
+});
 
       const data = await response.json();
 
