@@ -72,12 +72,15 @@ const ML_MODELS = [
 const CORE_PRODUCTS = ["SD-WAN", "SWG (Secure Web Gateway)", "FWaaS", "CASB"];
 
 const ADDON_PRODUCTS = [
+  { id: "ngfw", label: "NGFW", desc: "Next-Gen Firewall" },
+  { id: "ztna", label: "ZTNA", desc: "Zero Trust Network Access" },
   { id: "dlp", label: "DLP", desc: "Data Loss Prevention" },
   { id: "casb", label: "CASB", desc: "Cloud Access Security Broker" },
   { id: "dem", label: "DEM", desc: "Digital Experience Monitoring" },
   { id: "browser", label: "Browser Isolation", desc: "Remote Browser Isolation / RBI" },
-  { id: "ztna", label: "ZTNA", desc: "Zero Trust Network Access" },
   { id: "email_sec", label: "Email Security", desc: "Cloud email threat protection" },
+  { id: "cspm", label: "CSPM", desc: "Cloud Security Posture Management" },
+  { id: "mdr", label: "MDR", desc: "Managed Detection & Response" },
 ];
 
 const INDUSTRIES = [
@@ -867,6 +870,33 @@ When responding:
   );
 }
 
+// ─── Helper: derive recommended sales actions from a customer's scores ─────
+function getRecommendedActions(customer) {
+  const actions = [];
+  const churn = customer.churn.churnProbability;
+  const upsellEntries = Object.entries(customer.upsell)
+    .sort((a, b) => b[1].probability - a[1].probability);
+  const highUpsells = upsellEntries.filter(([, d]) => d.probability >= 50);
+
+  if (churn >= 60) {
+    actions.push({ type: "retention", label: "⚠ Retention: escalate to CSM", color: "#993C1D", bg: "#FAECE7" });
+  } else if (churn >= 35) {
+    actions.push({ type: "monitor", label: "Monitor: proactive check-in", color: "#854F0B", bg: "#FAEEDA" });
+  }
+
+  if (highUpsells.length >= 2) {
+    const names = highUpsells.slice(0, 2).map(([p]) => p.toUpperCase()).join(" + ");
+    actions.push({ type: "cosell", label: `🤝 Co-sell bundle: ${names}`, color: "#533AB7", bg: "#EEEDFE" });
+  } else if (highUpsells.length === 1) {
+    actions.push({ type: "upsell", label: `↑ Upsell: ${highUpsells[0][0].toUpperCase()}`, color: "#0F6E56", bg: "#E1F5EE" });
+  }
+
+  if (actions.length === 0) {
+    actions.push({ type: "steady", label: "Steady — no action needed", color: "#666666", bg: "#F1EFE8" });
+  }
+  return actions;
+}
+
 function ScoreGauge({ score }) {
   const color = score >= 65 ? "#0F6E56" : score >= 35 ? "#854F0B" : "#993C1D";
   const bg = score >= 65 ? "#E1F5EE" : score >= 35 ? "#FAEEDA" : "#FAECE7";
@@ -972,7 +1002,7 @@ function ScoringTab() {
           {fileName ? `📄 ${fileName}` : "Click to upload customer CSV"}
         </p>
         <p style={{ fontSize: 12, color: "var(--color-text-tertiary)", margin: 0 }}>
-          {rows.length > 0 ? `${rows.length} customers loaded` : "Expects the standard customer export columns (see README)"}
+          {rows.length > 0 ? `${rows.length} customers loaded` : "For this demo, upload sase_synthetic_3000.csv (included in the repo)"}
         </p>
       </div>
 
@@ -1017,12 +1047,14 @@ function ScoringTab() {
                   <th style={{ textAlign: "left", padding: "6px 10px" }}>Customer</th>
                   <th style={{ textAlign: "right", padding: "6px 10px" }}>Churn Risk</th>
                   <th style={{ textAlign: "left", padding: "6px 10px" }}>Top Upsell Targets</th>
+                  <th style={{ textAlign: "left", padding: "6px 10px" }}>Recommended Action</th>
                 </tr>
               </thead>
               <tbody>
                 {sortedScored.map((c) => {
                   const upsellSorted = Object.entries(c.upsell).sort((a, b) => b[1].probability - a[1].probability).slice(0, 3);
                   const churnColor = c.churn.churnProbability >= 60 ? "#993C1D" : c.churn.churnProbability >= 35 ? "#854F0B" : "#0F6E56";
+                  const actions = getRecommendedActions(c);
                   return (
                     <tr key={c.customer_id} style={{ borderBottom: "0.5px solid var(--color-border-tertiary)" }}>
                       <td style={{ padding: "7px 10px", fontWeight: 500 }}>{c.company_name}</td>
@@ -1033,6 +1065,14 @@ function ScoringTab() {
                             display: "inline-block", fontSize: 10, marginRight: 6, marginBottom: 2,
                             background: "#E1F5EE", color: "#0F6E56", padding: "1px 6px", borderRadius: 4,
                           }}>{product} {d.probability}%</span>
+                        ))}
+                      </td>
+                      <td style={{ padding: "7px 10px" }}>
+                        {actions.map((a, i) => (
+                          <span key={i} style={{
+                            display: "inline-block", fontSize: 10, marginRight: 5, marginBottom: 2,
+                            background: a.bg, color: a.color, padding: "2px 7px", borderRadius: 4, fontWeight: 500,
+                          }}>{a.label}</span>
                         ))}
                       </td>
                     </tr>
