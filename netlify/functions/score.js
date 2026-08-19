@@ -3,21 +3,33 @@
 // inference, so results are deterministic and reproducible.
 
 import fs from "fs";
+import path from "path";
 import { scoreChurn, scoreUpsell } from "./lib/forest.js";
+
+// Netlify's function bundler auto-injects a working `__dirname` at build time —
+// we deliberately do NOT redeclare it ourselves (that caused a SyntaxError),
+// and we don't derive it from import.meta.url either (that resolved to an
+// invalid path once bundled). We just use the injected global directly.
 
 let churnModel = null;
 let upsellModel = null;
 
+function resolveModelsDir() {
+  // Primary: Netlify's bundler-injected __dirname (works in most configs)
+  if (typeof __dirname !== "undefined") {
+    return path.join(__dirname, "models");
+  }
+  // Fallback: derive from the current working directory Netlify sets for the function
+  return path.join(process.cwd(), "netlify", "functions", "models");
+}
+
 function loadModels() {
+  const modelsDir = resolveModelsDir();
   if (!churnModel) {
-    churnModel = JSON.parse(
-      fs.readFileSync(new URL("./models/model_churn.json", import.meta.url), "utf8")
-    );
+    churnModel = JSON.parse(fs.readFileSync(path.join(modelsDir, "model_churn.json"), "utf8"));
   }
   if (!upsellModel) {
-    upsellModel = JSON.parse(
-      fs.readFileSync(new URL("./models/model_upsell.json", import.meta.url), "utf8")
-    );
+    upsellModel = JSON.parse(fs.readFileSync(path.join(modelsDir, "model_upsell.json"), "utf8"));
   }
 }
 
@@ -31,6 +43,14 @@ export async function handler(event) {
 
   try {
     loadModels();
+  } catch (err) {
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: { message: `Failed to load models: ${err.message}` } }),
+    };
+  }
+
+  try {
     const { records } = JSON.parse(event.body);
 
     if (!Array.isArray(records) || records.length === 0) {
