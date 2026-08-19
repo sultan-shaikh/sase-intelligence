@@ -1,7 +1,9 @@
 import { useState, useRef, useCallback } from "react";
 
 // ─── Configuration ────────────────────────────────────────────────────────────
+// No API key needed here anymore — it lives server-side in the Netlify function
 // (netlify/functions/analyze.js) and is never exposed to the browser.
+
 const VENDORS = ["Fortinet", "Palo Alto Networks", "Cisco", "Zscaler", "Cato Networks", "Versa Networks"];
 
 const STAGES = [
@@ -19,26 +21,18 @@ const ML_MODELS = [
     bg: "#E6F1FB",
     desc: "Ensemble of decision trees trained on historical win/loss outcomes. Outputs probability score 0–100% per opportunity.",
     features: ["Deal size", "Stage age", "Vendor", "Competitor count", "RFP complexity"],
-  },
-  {
-    id: "stage_velocity",
-    label: "Stage Velocity",
-    model: "Gradient Boosting (XGBoost)",
-    icon: "XG",
-    color: "#0F6E56",
-    bg: "#E1F5EE",
-    desc: "Predicts how fast a deal will progress through pipeline stages based on historical stage transition patterns.",
-    features: ["Days in stage", "Contact engagement", "Vendor type", "Deal value", "Previous stage time"],
+    real: false,
   },
   {
     id: "churn_risk",
     label: "Churn / Stall Risk",
-    model: "Logistic Regression",
-    icon: "LR",
+    model: "Random Forest Classifier (trained)",
+    icon: "RF",
     color: "#993C1D",
     bg: "#FAECE7",
-    desc: "Binary classifier estimating probability of deal stalling or dropping from pipeline. Trained on 18+ stall signals.",
-    features: ["Last activity date", "Stage duration", "Communication frequency", "Budget confirmed", "Champion identified"],
+    desc: "Real scikit-learn Random Forest trained on your uploaded customer CSV — NPS, ticket history, breach risk, adoption rates. Not simulated.",
+    features: ["NPS score", "Security incidents", "Breach risk score", "Support tickets", "Feature adoption rate"],
+    real: true,
   },
   {
     id: "deal_size",
@@ -49,6 +43,7 @@ const ML_MODELS = [
     bg: "#FAEEDA",
     desc: "Regularised linear model predicting expected deal value. Ridge penalty prevents overfitting on sparse vendor segments.",
     features: ["Headcount", "Industry", "Vendor SKUs", "Contract length", "Deployment type"],
+    real: false,
   },
   {
     id: "competitor_analysis",
@@ -59,17 +54,35 @@ const ML_MODELS = [
     bg: "#EEEDFE",
     desc: "Text mining of win/loss notes using TF-IDF vectorisation and K-Means clustering to extract competitive patterns.",
     features: ["Loss reason notes", "Competitor mentions", "Evaluation criteria", "Decision maker language"],
+    real: false,
   },
   {
-    id: "pipeline_forecast",
-    label: "Pipeline Forecast",
-    model: "LSTM Neural Network",
-    icon: "NN",
-    color: "#3B6D11",
-    bg: "#EAF3DE",
-    desc: "Sequential deep learning model for time-series pipeline forecasting. Learns seasonal patterns and macro deal cycles.",
-    features: ["Weekly pipeline snapshots", "Stage cohort history", "Booking trends", "Seasonal signals"],
+    id: "upsell_propensity",
+    label: "Upsell Propensity",
+    model: "Random Forest Classifier (trained, x7)",
+    icon: "RF",
+    color: "#0F6E56",
+    bg: "#E1F5EE",
+    desc: "One real Random Forest per product (NGFW, SD-WAN, SSE, Threat Mgmt, Enterprise Browser, Automated/Managed SOC), trained on your uploaded customer CSV to score adoption probability per customer.",
+    features: ["Product adoption rate", "Feature adoption rate", "Contract value", "Current services", "Industry vertical"],
+    real: true,
   },
+];
+
+const CORE_PRODUCTS = ["SD-WAN", "SWG (Secure Web Gateway)", "FWaaS", "CASB"];
+
+const ADDON_PRODUCTS = [
+  { id: "dlp", label: "DLP", desc: "Data Loss Prevention" },
+  { id: "casb", label: "CASB", desc: "Cloud Access Security Broker" },
+  { id: "dem", label: "DEM", desc: "Digital Experience Monitoring" },
+  { id: "browser", label: "Browser Isolation", desc: "Remote Browser Isolation / RBI" },
+  { id: "ztna", label: "ZTNA", desc: "Zero Trust Network Access" },
+  { id: "email_sec", label: "Email Security", desc: "Cloud email threat protection" },
+];
+
+const INDUSTRIES = [
+  "Financial Services", "Healthcare", "Retail", "Manufacturing",
+  "Public Sector", "Legal", "Professional Services", "Logistics", "Other",
 ];
 
 const INSIGHT_QUESTIONS = [
@@ -93,6 +106,36 @@ const SUMMARY_STATS = [
   { label: "Top Vendor", value: "Fortinet", sub: "by volume" },
   { label: "At-Risk Deals", value: "23", sub: "need attention", alert: true },
 ];
+
+// ─── Helper: minimal CSV parser (handles quoted fields, no external dep) ────
+function parseCSV(text) {
+  const rows = [];
+  let row = [], field = "", inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i], next = text[i + 1];
+    if (inQuotes) {
+      if (c === '"' && next === '"') { field += '"'; i++; }
+      else if (c === '"') { inQuotes = false; }
+      else { field += c; }
+    } else {
+      if (c === '"') inQuotes = true;
+      else if (c === ",") { row.push(field); field = ""; }
+      else if (c === "\n" || c === "\r") {
+        if (field !== "" || row.length > 0) { row.push(field); rows.push(row); }
+        field = ""; row = [];
+        if (c === "\r" && next === "\n") i++;
+      } else { field += c; }
+    }
+  }
+  if (field !== "" || row.length > 0) { row.push(field); rows.push(row); }
+  if (rows.length === 0) return [];
+  const header = rows[0].map(h => h.trim().replace(/^\uFEFF/, ""));
+  return rows.slice(1).filter(r => r.length === header.length).map(r => {
+    const obj = {};
+    header.forEach((h, i) => { obj[h] = r[i]; });
+    return obj;
+  });
+}
 
 // ─── Helper: render simple markdown bold ─────────────────────────────────────
 function renderMarkdown(text) {
@@ -151,6 +194,8 @@ function TabBar({ activeTab, setActiveTab, conversationCount }) {
     { id: "upload", label: "1. Upload Data" },
     { id: "models", label: "2. Configure ML Models" },
     { id: "insights", label: `3. Insights${conversationCount > 0 ? ` (${conversationCount})` : ""}` },
+    { id: "scoring", label: "4. Score Customers (Real ML)" },
+    { id: "upsell", label: "5. Single-Customer Upsell" },
   ];
   return (
     <div style={{ background: "#0C1929", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
@@ -394,7 +439,16 @@ function ModelsTab({ selectedModels, toggleModel, setActiveTab }) {
                     fontFamily: "'DM Mono', monospace", letterSpacing: 0.5, flexShrink: 0,
                   }}>{model.icon}</div>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: "var(--color-text-primary)" }}>{model.label}</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: "var(--color-text-primary)" }}>{model.label}</span>
+                      {model.real && (
+                        <span style={{
+                          fontSize: 8, fontWeight: 700, letterSpacing: 0.4, color: "#0F6E56",
+                          background: "#E1F5EE", border: "1px solid #0F6E5640",
+                          padding: "1px 5px", borderRadius: 3,
+                        }}>REAL MODEL</span>
+                      )}
+                    </div>
                     <div style={{ fontSize: 10, color: model.color, fontFamily: "'DM Mono', monospace", marginTop: 1 }}>{model.model}</div>
                   </div>
                   <div style={{
@@ -557,17 +611,17 @@ When responding:
       const messages = updatedConv.map(m => ({ role: m.role, content: m.content }));
 
       const response = await fetch("/.netlify/functions/analyze", {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json",
-  },
-  body: JSON.stringify({
-    model: "claude-sonnet-4-6",
-    max_tokens: 1000,
-    system: systemPrompt,
-    messages,
-  }),
-});
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 1000,
+          system: systemPrompt,
+          messages,
+        }),
+      });
 
       const data = await response.json();
 
@@ -813,11 +867,441 @@ When responding:
   );
 }
 
+function ScoreGauge({ score }) {
+  const color = score >= 65 ? "#0F6E56" : score >= 35 ? "#854F0B" : "#993C1D";
+  const bg = score >= 65 ? "#E1F5EE" : score >= 35 ? "#FAEEDA" : "#FAECE7";
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 14, padding: "1rem 1.25rem",
+      background: bg, borderRadius: "var(--border-radius-lg)", border: `1px solid ${color}30`,
+    }}>
+      <div style={{
+        width: 64, height: 64, borderRadius: "50%", flexShrink: 0,
+        background: `conic-gradient(${color} ${score * 3.6}deg, ${color}20 0deg)`,
+        display: "flex", alignItems: "center", justifyContent: "center",
+      }}>
+        <div style={{
+          width: 50, height: 50, borderRadius: "50%", background: "var(--color-bg-primary)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 15, fontWeight: 700, color,
+        }}>{score}%</div>
+      </div>
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 600, color }}>
+          {score >= 65 ? "High propensity" : score >= 35 ? "Moderate propensity" : "Low propensity"}
+        </div>
+        <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 2 }}>
+          Estimated probability of adoption within next 2 quarters
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ScoringTab() {
+  const [rows, setRows] = useState([]);
+  const [fileName, setFileName] = useState("");
+  const [isScoring, setIsScoring] = useState(false);
+  const [scored, setScored] = useState(null);
+  const [error, setError] = useState(null);
+  const [sortBy, setSortBy] = useState("churn");
+  const fileInputRef = useRef(null);
+
+  const handleFile = (file) => {
+    if (!file) return;
+    setFileName(file.name);
+    setScored(null);
+    setError(null);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const parsed = parseCSV(e.target.result);
+        setRows(parsed);
+      } catch (err) {
+        setError("Could not parse CSV: " + err.message);
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const runScoring = async () => {
+    if (rows.length === 0 || isScoring) return;
+    setIsScoring(true);
+    setError(null);
+    try {
+      const response = await fetch("/.netlify/functions/score", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ records: rows }),
+      });
+      const data = await response.json();
+      if (data.error) throw new Error(data.error.message || "Scoring error");
+      setScored(data.scored);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setIsScoring(false);
+    }
+  };
+
+  const sortedScored = scored ? [...scored].sort((a, b) => {
+    if (sortBy === "churn") return b.churn.churnProbability - a.churn.churnProbability;
+    const bestB = Math.max(...Object.values(b.upsell).map(u => u.probability));
+    const bestA = Math.max(...Object.values(a.upsell).map(u => u.probability));
+    return bestB - bestA;
+  }) : [];
+
+  return (
+    <div>
+      <p style={{ fontSize: 13, color: "var(--color-text-secondary)", marginBottom: "1.25rem" }}>
+        Upload a real customer export (Salesforce-style CSV) and score every row against the
+        <strong> real, pre-trained Random Forest models</strong> — churn risk and per-product upsell
+        propensity. No LLM is involved in this scoring step; it's deterministic model inference.
+      </p>
+
+      <div
+        onClick={() => fileInputRef.current?.click()}
+        style={{
+          border: "2px dashed var(--color-border-secondary)", borderRadius: "var(--border-radius-lg)",
+          padding: "2rem", textAlign: "center", cursor: "pointer",
+          background: "var(--color-bg-primary)", marginBottom: "1rem",
+        }}>
+        <input ref={fileInputRef} type="file" accept=".csv" style={{ display: "none" }}
+          onChange={(e) => handleFile(e.target.files[0])} />
+        <p style={{ fontWeight: 600, fontSize: 14, margin: "0 0 4px" }}>
+          {fileName ? `📄 ${fileName}` : "Click to upload customer CSV"}
+        </p>
+        <p style={{ fontSize: 12, color: "var(--color-text-tertiary)", margin: 0 }}>
+          {rows.length > 0 ? `${rows.length} customers loaded` : "Expects the standard customer export columns (see README)"}
+        </p>
+      </div>
+
+      {rows.length > 0 && (
+        <button onClick={runScoring} disabled={isScoring} style={{
+          padding: "0.7rem 1.6rem", fontSize: 13, fontWeight: 600, fontFamily: "inherit",
+          background: isScoring ? "var(--color-bg-secondary)" : "#0C1929",
+          color: isScoring ? "var(--color-text-tertiary)" : "white",
+          border: "none", borderRadius: "var(--border-radius-md)", cursor: "pointer", marginBottom: "1.25rem",
+        }}>
+          {isScoring ? "Scoring with Random Forest models…" : `Score ${rows.length} Customers →`}
+        </button>
+      )}
+
+      {error && (
+        <div style={{ background: "var(--color-bg-danger)", border: "0.5px solid var(--color-border-danger)", borderRadius: "var(--border-radius-md)", padding: "0.75rem 1rem", marginBottom: 12 }}>
+          <p style={{ fontSize: 12, color: "var(--color-text-danger)", margin: 0 }}>{error}</p>
+        </div>
+      )}
+
+      {scored && (
+        <div style={{ background: "var(--color-bg-primary)", border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-lg)", overflow: "hidden" }}>
+          <div style={{ padding: "0.75rem 1rem", borderBottom: "0.5px solid var(--color-border-tertiary)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontSize: 13, fontWeight: 600 }}>{scored.length} customers scored</span>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button onClick={() => setSortBy("churn")} style={{
+                fontSize: 11, padding: "3px 10px", borderRadius: 4, cursor: "pointer", fontFamily: "inherit",
+                background: sortBy === "churn" ? "#0C1929" : "var(--color-bg-secondary)",
+                color: sortBy === "churn" ? "white" : "var(--color-text-secondary)", border: "none",
+              }}>Sort: Churn risk</button>
+              <button onClick={() => setSortBy("upsell")} style={{
+                fontSize: 11, padding: "3px 10px", borderRadius: 4, cursor: "pointer", fontFamily: "inherit",
+                background: sortBy === "upsell" ? "#0C1929" : "var(--color-bg-secondary)",
+                color: sortBy === "upsell" ? "white" : "var(--color-text-secondary)", border: "none",
+              }}>Sort: Best upsell</button>
+            </div>
+          </div>
+          <div style={{ maxHeight: 520, overflowY: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr style={{ background: "var(--color-bg-secondary)", position: "sticky", top: 0 }}>
+                  <th style={{ textAlign: "left", padding: "6px 10px" }}>Customer</th>
+                  <th style={{ textAlign: "right", padding: "6px 10px" }}>Churn Risk</th>
+                  <th style={{ textAlign: "left", padding: "6px 10px" }}>Top Upsell Targets</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedScored.map((c) => {
+                  const upsellSorted = Object.entries(c.upsell).sort((a, b) => b[1].probability - a[1].probability).slice(0, 3);
+                  const churnColor = c.churn.churnProbability >= 60 ? "#993C1D" : c.churn.churnProbability >= 35 ? "#854F0B" : "#0F6E56";
+                  return (
+                    <tr key={c.customer_id} style={{ borderBottom: "0.5px solid var(--color-border-tertiary)" }}>
+                      <td style={{ padding: "7px 10px", fontWeight: 500 }}>{c.company_name}</td>
+                      <td style={{ padding: "7px 10px", textAlign: "right", color: churnColor, fontWeight: 600 }}>{c.churn.churnProbability}%</td>
+                      <td style={{ padding: "7px 10px" }}>
+                        {upsellSorted.map(([product, d]) => (
+                          <span key={product} style={{
+                            display: "inline-block", fontSize: 10, marginRight: 6, marginBottom: 2,
+                            background: "#E1F5EE", color: "#0F6E56", padding: "1px 6px", borderRadius: 4,
+                          }}>{product} {d.probability}%</span>
+                        ))}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UpsellTab() {
+  const [customerName, setCustomerName] = useState("");
+  const [industry, setIndustry] = useState(INDUSTRIES[0]);
+  const [ownedProducts, setOwnedProducts] = useState(["SD-WAN", "SWG (Secure Web Gateway)"]);
+  const [targetProduct, setTargetProduct] = useState("ztna");
+  const [useWebSearch, setUseWebSearch] = useState(true);
+  const [isScoring, setIsScoring] = useState(false);
+  const [result, setResult] = useState(null); // { score, text, sources }
+  const [error, setError] = useState(null);
+
+  const toggleOwned = (p) => {
+    setOwnedProducts(prev => prev.includes(p) ? prev.filter(x => x !== p) : [...prev, p]);
+  };
+
+  const runScoring = async () => {
+    if (!customerName.trim() || isScoring) return;
+    setIsScoring(true);
+    setError(null);
+    setResult(null);
+
+    const target = ADDON_PRODUCTS.find(p => p.id === targetProduct);
+
+    const systemPrompt = `You are an upsell/cross-sell propensity scoring engine for a UK Managed Service Provider (MSP) selling Managed SASE (Fortinet, Palo Alto Networks, Cisco, Zscaler, Cato Networks, Versa Networks).
+
+Task: estimate the probability (0-100%) that a specific existing customer will adopt a specific SASE add-on product they don't currently have, within the next 2 quarters.
+
+Base your reasoning on THREE signal types, and address each explicitly:
+1. CONSUMPTION & SUBSCRIPTION PATTERNS — reason about what typically precedes adoption of this add-on among customers already on the products this customer holds (simulate realistic MSP peer-cohort patterns — e.g. "customers who add DEM after SD-WAN + SWG typically do so within 9-14 months, driven by X").
+2. INDUSTRY UPTAKE — general adoption trends of this add-on within the customer's industry vertical (use your knowledge; note if web search results add anything current).
+3. CUSTOMER-SPECIFIC SIGNALS — use web_search to find real, current, publicly available information about this named company (funding rounds, M&A, security incidents, cloud/remote-work initiatives, hiring for security/IT roles, compliance pressure, leadership changes) that would plausibly raise or lower demand for this specific product. If search finds nothing relevant, say so plainly rather than inventing signals.
+
+Output format:
+- Start with a single line: "SCORE: <number>" (integer 0-100, your best estimate)
+- Then a section per signal type above (use **bold** subheadings: **Consumption Patterns**, **Industry Uptake**, **Customer-Specific Signals**)
+- End with **Recommended Play** — 1-2 concrete sentences on how the sales team should approach this (timing, angle, who to involve)
+- Be honest about uncertainty. Do not fabricate specific facts about the named company if search turns up nothing — say the search found no strong signal and rely on pattern/industry reasoning instead, and note the score is lower-confidence as a result.`;
+
+    const userMsg = `Customer: ${customerName}
+Industry: ${industry}
+Products currently owned: ${ownedProducts.join(", ") || "None specified"}
+Target product to score: ${target.label} (${target.desc})
+
+Score this customer's propensity to adopt ${target.label} in the next 2 quarters.`;
+
+    try {
+      const response = await fetch("/.netlify/functions/upsell", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          max_tokens: 1500,
+          system: systemPrompt,
+          messages: [{ role: "user", content: userMsg }],
+          enableWebSearch: useWebSearch,
+        }),
+      });
+
+      const data = await response.json();
+      if (data.error) throw new Error(data.error.message || "API error");
+
+      // Pull out all text blocks (there can be several when web_search is used
+      // interleaved with tool calls) and any web sources cited.
+      const textBlocks = (data.content || []).filter(b => b.type === "text");
+      const fullText = textBlocks.map(b => b.text).join("\n\n");
+
+      const sources = [];
+      textBlocks.forEach(b => {
+        (b.citations || []).forEach(c => {
+          if (c.url && !sources.find(s => s.url === c.url)) {
+            sources.push({ url: c.url, title: c.title || c.url });
+          }
+        });
+      });
+
+      const scoreMatch = fullText.match(/SCORE:\s*(\d{1,3})/i);
+      const score = scoreMatch ? Math.min(100, parseInt(scoreMatch[1], 10)) : null;
+      const bodyText = fullText.replace(/SCORE:\s*\d{1,3}\s*/i, "").trim();
+
+      setResult({ score, text: bodyText || "No response generated.", sources });
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setIsScoring(false);
+    }
+  };
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "340px 1fr", gap: "1.5rem" }}>
+      {/* Left: inputs */}
+      <div style={{
+        background: "var(--color-bg-primary)", border: "0.5px solid var(--color-border-tertiary)",
+        borderRadius: "var(--border-radius-lg)", padding: "1.25rem", height: "fit-content",
+      }}>
+        <p style={{ fontSize: 11, fontWeight: 600, color: "var(--color-text-tertiary)", margin: "0 0 12px", textTransform: "uppercase", letterSpacing: 0.8 }}>
+          Customer & Target Product
+        </p>
+
+        <label style={{ fontSize: 11, fontWeight: 600, color: "var(--color-text-secondary)" }}>Customer name</label>
+        <input
+          type="text"
+          placeholder="e.g. Acme Logistics Ltd"
+          value={customerName}
+          onChange={(e) => setCustomerName(e.target.value)}
+          style={{
+            width: "100%", marginTop: 4, marginBottom: 12, padding: "0.5rem 0.7rem",
+            fontSize: 13, fontFamily: "inherit", border: "0.5px solid var(--color-border-tertiary)",
+            borderRadius: "var(--border-radius-md)", background: "var(--color-bg-secondary)",
+            color: "var(--color-text-primary)", outline: "none", boxSizing: "border-box",
+          }}
+        />
+
+        <label style={{ fontSize: 11, fontWeight: 600, color: "var(--color-text-secondary)" }}>Industry</label>
+        <select
+          value={industry}
+          onChange={(e) => setIndustry(e.target.value)}
+          style={{
+            width: "100%", marginTop: 4, marginBottom: 12, padding: "0.5rem 0.7rem",
+            fontSize: 13, fontFamily: "inherit", border: "0.5px solid var(--color-border-tertiary)",
+            borderRadius: "var(--border-radius-md)", background: "var(--color-bg-secondary)",
+            color: "var(--color-text-primary)", outline: "none", boxSizing: "border-box",
+          }}
+        >
+          {INDUSTRIES.map(i => <option key={i} value={i}>{i}</option>)}
+        </select>
+
+        <label style={{ fontSize: 11, fontWeight: 600, color: "var(--color-text-secondary)" }}>Products currently owned</label>
+        <div style={{ marginTop: 6, marginBottom: 12 }}>
+          {CORE_PRODUCTS.map(p => (
+            <label key={p} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0", fontSize: 12, color: "var(--color-text-primary)", cursor: "pointer" }}>
+              <input type="checkbox" checked={ownedProducts.includes(p)} onChange={() => toggleOwned(p)} />
+              {p}
+            </label>
+          ))}
+        </div>
+
+        <label style={{ fontSize: 11, fontWeight: 600, color: "var(--color-text-secondary)" }}>Target add-on to score</label>
+        <select
+          value={targetProduct}
+          onChange={(e) => setTargetProduct(e.target.value)}
+          style={{
+            width: "100%", marginTop: 4, marginBottom: 12, padding: "0.5rem 0.7rem",
+            fontSize: 13, fontFamily: "inherit", border: "0.5px solid var(--color-border-tertiary)",
+            borderRadius: "var(--border-radius-md)", background: "var(--color-bg-secondary)",
+            color: "var(--color-text-primary)", outline: "none", boxSizing: "border-box",
+          }}
+        >
+          {ADDON_PRODUCTS.map(p => <option key={p.id} value={p.id}>{p.label} — {p.desc}</option>)}
+        </select>
+
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--color-text-secondary)", cursor: "pointer", marginBottom: 14 }}>
+          <input type="checkbox" checked={useWebSearch} onChange={(e) => setUseWebSearch(e.target.checked)} />
+          Search the web for real customer signals
+        </label>
+
+        <button
+          onClick={runScoring}
+          disabled={!customerName.trim() || isScoring}
+          style={{
+            width: "100%", padding: "0.7rem", fontSize: 13, fontWeight: 600, fontFamily: "inherit",
+            background: !customerName.trim() || isScoring ? "var(--color-bg-secondary)" : "#0C1929",
+            color: !customerName.trim() || isScoring ? "var(--color-text-tertiary)" : "white",
+            border: "none", borderRadius: "var(--border-radius-md)", cursor: "pointer",
+          }}
+        >
+          {isScoring ? (useWebSearch ? "Searching + scoring…" : "Scoring…") : "Score Upsell Probability →"}
+        </button>
+
+        <p style={{ fontSize: 10, color: "var(--color-text-tertiary)", marginTop: 10, lineHeight: 1.5 }}>
+          Consumption-pattern and industry-uptake reasoning is currently simulated (no historical
+          CRM export connected yet). Customer-specific signals use live web search when enabled.
+        </p>
+      </div>
+
+      {/* Right: results */}
+      <div>
+        {!result && !error && !isScoring && (
+          <div style={{
+            background: "var(--color-bg-primary)", border: "0.5px solid var(--color-border-tertiary)",
+            borderRadius: "var(--border-radius-lg)", padding: "3rem 2rem", textAlign: "center",
+            color: "var(--color-text-tertiary)",
+          }}>
+            <p style={{ fontSize: 14, fontWeight: 500, color: "var(--color-text-secondary)", margin: "0 0 6px" }}>
+              Enter a customer and target product, then run scoring
+            </p>
+            <p style={{ fontSize: 12, margin: 0 }}>
+              Combines simulated peer/consumption patterns, industry uptake, and (optionally) live web signals.
+            </p>
+          </div>
+        )}
+
+        {isScoring && (
+          <div style={{
+            background: "var(--color-bg-primary)", border: "0.5px solid var(--color-border-tertiary)",
+            borderRadius: "var(--border-radius-lg)", padding: "3rem 2rem", textAlign: "center",
+          }}>
+            <div style={{ display: "flex", gap: 5, justifyContent: "center", marginBottom: 12 }}>
+              {[0, 1, 2].map(i => (
+                <div key={i} style={{ width: 8, height: 8, borderRadius: "50%", background: "#378ADD", animation: `pulse 1s ${i * 0.22}s infinite` }} />
+              ))}
+            </div>
+            <p style={{ fontSize: 12, color: "var(--color-text-secondary)", margin: 0 }}>
+              {useWebSearch ? "Searching the web for customer signals and scoring…" : "Scoring propensity…"}
+            </p>
+          </div>
+        )}
+
+        {error && (
+          <div style={{
+            background: "var(--color-bg-danger)", border: "0.5px solid var(--color-border-danger)",
+            borderRadius: "var(--border-radius-lg)", padding: "1rem 1.25rem",
+          }}>
+            <p style={{ fontSize: 13, color: "var(--color-text-danger)", margin: 0 }}>Error: {error}</p>
+          </div>
+        )}
+
+        {result && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            {result.score !== null && <ScoreGauge score={result.score} />}
+
+            <div style={{
+              background: "var(--color-bg-primary)", border: "0.5px solid var(--color-border-tertiary)",
+              borderRadius: "var(--border-radius-lg)", padding: "1.25rem",
+              fontSize: 13, lineHeight: 1.7, color: "var(--color-text-primary)",
+            }}>
+              <p style={{ margin: 0 }} dangerouslySetInnerHTML={{ __html: renderMarkdown(result.text) }} />
+            </div>
+
+            {result.sources.length > 0 && (
+              <div style={{
+                background: "var(--color-bg-secondary)", border: "0.5px solid var(--color-border-tertiary)",
+                borderRadius: "var(--border-radius-lg)", padding: "1rem 1.25rem",
+              }}>
+                <p style={{ fontSize: 11, fontWeight: 600, color: "var(--color-text-tertiary)", margin: "0 0 8px", textTransform: "uppercase", letterSpacing: 0.8 }}>
+                  Web sources used
+                </p>
+                {result.sources.map((s, i) => (
+                  <a key={i} href={s.url} target="_blank" rel="noopener noreferrer" style={{
+                    display: "block", fontSize: 12, color: "var(--color-text-info)",
+                    marginBottom: 5, textDecoration: "none", overflow: "hidden",
+                    textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  }}>{s.title}</a>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [activeTab, setActiveTab] = useState("upload");
   const [uploadedFiles, setUploadedFiles] = useState([]);
-  const [selectedModels, setSelectedModels] = useState(["win_probability", "stage_velocity", "churn_risk"]);
+  const [selectedModels, setSelectedModels] = useState(["win_probability", "churn_risk", "upsell_propensity"]);
   const [conversation, setConversation] = useState([]);
   const [isAnalysing, setIsAnalysing] = useState(false);
 
@@ -861,6 +1345,8 @@ export default function App() {
             uploadedFiles={uploadedFiles}
           />
         )}
+        {activeTab === "scoring" && <ScoringTab />}
+        {activeTab === "upsell" && <UpsellTab />}
       </div>
     </div>
   );
