@@ -976,8 +976,19 @@ function ScoringTab() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ records: batches[i] }),
         });
-        const data = await response.json();
+        let data;
+        try {
+          data = await response.json();
+        } catch {
+          throw new Error(`Batch ${i + 1}/${batches.length} failed: server returned a non-JSON response (HTTP ${response.status}). This usually means the function crashed or timed out.`);
+        }
+        if (!response.ok) {
+          throw new Error(`Batch ${i + 1}/${batches.length} failed (HTTP ${response.status}): ${data?.error?.message || JSON.stringify(data).slice(0, 200)}`);
+        }
         if (data.error) throw new Error(`Batch ${i + 1}/${batches.length} failed: ${data.error.message || "Scoring error"}`);
+        if (!Array.isArray(data.scored)) {
+          throw new Error(`Batch ${i + 1}/${batches.length} returned an unexpected response shape: ${JSON.stringify(data).slice(0, 200)}`);
+        }
         allScored.push(...data.scored);
       }
       setScored(allScored);
