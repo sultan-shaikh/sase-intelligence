@@ -89,16 +89,16 @@ const INDUSTRIES = [
 ];
 
 const INSIGHT_QUESTIONS = [
-  "What is our win rate by vendor across Fortinet, Palo Alto, Cisco, and Zscaler?",
-  "Which pipeline stage has the highest deal drop-off rate?",
-  "What deal size range do we win most frequently?",
-  "What are the top 3 reasons we lose deals to competitors?",
-  "Which vendor has the fastest average sales cycle to close?",
-  "What is the win probability for deals currently at RFP stage?",
-  "Show me competitive patterns — where are we losing and to whom?",
-  "Forecast next quarter pipeline value based on current stage distribution",
-  "Which deals are at highest churn/stall risk right now?",
-  "What is our average deal size by industry vertical?",
+  { text: "What is our win rate by vendor across Fortinet, Palo Alto, Cisco, and Zscaler?", models: ["win_probability"] },
+  { text: "What is the win probability for deals currently at RFP stage?", models: ["win_probability"] },
+  { text: "Which deals are at highest churn/stall risk right now?", models: ["churn_risk"] },
+  { text: "What are the leading indicators that a customer is about to churn?", models: ["churn_risk"] },
+  { text: "What deal size range do we win most frequently?", models: ["deal_size"] },
+  { text: "What is our average deal size by industry vertical?", models: ["deal_size"] },
+  { text: "What are the top 3 reasons we lose deals to competitors?", models: ["competitor_analysis"] },
+  { text: "Show me competitive patterns — where are we losing and to whom?", models: ["competitor_analysis"] },
+  { text: "Which customers have the highest propensity to buy ZTNA or DLP next?", models: ["upsell_propensity"] },
+  { text: "Which add-on products have the strongest upsell signal across our base?", models: ["upsell_propensity"] },
 ];
 
 // Computes dashboard summary cards from REAL uploaded/scored data.
@@ -708,19 +708,27 @@ When responding:
         }}>
           <div style={{ padding: "0.65rem 1rem", borderBottom: "0.5px solid var(--color-border-tertiary)" }}>
             <p style={{ fontSize: 11, fontWeight: 600, margin: 0, color: "var(--color-text-tertiary)", textTransform: "uppercase", letterSpacing: 0.8 }}>
-              Quick Insights
+              Quick Insights {selectedModels.length > 0 && `(for your ${selectedModels.length} active model${selectedModels.length !== 1 ? "s" : ""})`}
             </p>
           </div>
-          {INSIGHT_QUESTIONS.map((q, i) => (
-            <button key={i} onClick={() => setSelectedQuestion(q)} style={{
-              display: "block", width: "100%", textAlign: "left",
-              padding: "0.55rem 1rem", background: selectedQuestion === q ? "var(--color-bg-info)" : "none",
-              border: "none", borderBottom: "0.5px solid var(--color-border-tertiary)",
-              cursor: "pointer", fontSize: 12, lineHeight: 1.4, fontFamily: "inherit",
-              color: selectedQuestion === q ? "var(--color-text-info)" : "var(--color-text-secondary)",
-              transition: "all 0.1s",
-            }}>{q}</button>
-          ))}
+          {INSIGHT_QUESTIONS.filter(q => q.models.some(m => selectedModels.includes(m))).length === 0 ? (
+            <p style={{ fontSize: 11, color: "var(--color-text-tertiary)", padding: "0.75rem 1rem", margin: 0 }}>
+              No quick insights for the models currently selected — pick one in step 2, or type a custom question below.
+            </p>
+          ) : (
+            INSIGHT_QUESTIONS
+              .filter(q => q.models.some(m => selectedModels.includes(m)))
+              .map((q, i) => (
+                <button key={i} onClick={() => setSelectedQuestion(q.text)} style={{
+                  display: "block", width: "100%", textAlign: "left",
+                  padding: "0.55rem 1rem", background: selectedQuestion === q.text ? "var(--color-bg-info)" : "none",
+                  border: "none", borderBottom: "0.5px solid var(--color-border-tertiary)",
+                  cursor: "pointer", fontSize: 12, lineHeight: 1.4, fontFamily: "inherit",
+                  color: selectedQuestion === q.text ? "var(--color-text-info)" : "var(--color-text-secondary)",
+                  transition: "all 0.1s",
+                }}>{q.text}</button>
+              ))
+          )}
         </div>
 
         {/* Active models */}
