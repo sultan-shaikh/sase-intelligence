@@ -26,11 +26,11 @@ const ML_MODELS = [
   {
     id: "churn_risk",
     label: "Churn / Stall Risk",
-    model: "Random Forest Classifier (trained)",
-    icon: "RF",
+    model: "Gradient Boosting Classifier (trained)",
+    icon: "GB",
     color: "#993C1D",
     bg: "#FAECE7",
-    desc: "Real scikit-learn Random Forest trained on your uploaded customer CSV — NPS, ticket history, breach risk, adoption rates. Not simulated.",
+    desc: "Real scikit-learn Gradient Boosting model trained on your uploaded customer CSV — NPS, ticket history, breach risk, adoption rates. Not simulated.",
     features: ["NPS score", "Security incidents", "Breach risk score", "Support tickets", "Feature adoption rate"],
     real: true,
   },
@@ -59,11 +59,11 @@ const ML_MODELS = [
   {
     id: "upsell_propensity",
     label: "Upsell Propensity",
-    model: "Random Forest Classifier (trained, x7)",
-    icon: "RF",
+    model: "Gradient Boosting Classifier (trained, x9)",
+    icon: "GB",
     color: "#0F6E56",
     bg: "#E1F5EE",
-    desc: "One real Random Forest per product (NGFW, SD-WAN, SSE, Threat Mgmt, Enterprise Browser, Automated/Managed SOC), trained on your uploaded customer CSV to score adoption probability per customer.",
+    desc: "One real Gradient Boosting model per product (NGFW, ZTNA, DLP, CASB, DEM, Browser Isolation, Email Security, CSPM, MDR), trained on your uploaded customer CSV to score adoption probability per customer.",
     features: ["Product adoption rate", "Feature adoption rate", "Contract value", "Current services", "Industry vertical"],
     real: true,
   },
@@ -983,6 +983,45 @@ function ScoringTab({ onRowsChange, onScoredChange }) {
   const [error, setError] = useState(null);
   const [sortBy, setSortBy] = useState("churn");
   const fileInputRef = useRef(null);
+  const [showWeights, setShowWeights] = useState(false);
+
+  // Default drivers + starting weights, seeded from the REAL Gradient Boosting
+  // feature_importances_ output (nps_score, security incidents, breach risk,
+  // tickets, adoption were the top learned drivers on your trained model).
+  // "direction: -1" means a HIGHER raw value means LOWER risk (e.g. NPS, adoption).
+  const [featureWeights, setFeatureWeights] = useState([
+    { key: "nps_score", label: "NPS Score", weight: 1.5, direction: -1, range: [-100, 100] },
+    { key: "security_incidents_last_12m", label: "Security Incidents (12m)", weight: 1.2, direction: 1, range: [0, 15] },
+    { key: "breach_risk_score", label: "Breach Risk Score", weight: 1.0, direction: 1, range: [0, 100] },
+    { key: "support_tickets_last_12m", label: "Support Tickets (12m)", weight: 0.8, direction: 1, range: [0, 40] },
+    { key: "product_adoption_rate", label: "Product Adoption Rate", weight: 1.3, direction: -1, range: [0, 100] },
+    { key: "unused_license_pct", label: "Unused License %", weight: 0.7, direction: 1, range: [0, 80] },
+  ]);
+
+  const updateWeight = (key, newWeight) => {
+    setFeatureWeights(prev => prev.map(f => f.key === key ? { ...f, weight: newWeight } : f));
+  };
+
+  // Computes a transparent, user-tunable composite risk score (0-100) per
+  // customer — separate from the real Gradient Boosting probability. This is
+  // the "admin-configurable weight" layer (same pattern Gainsight's health
+  // scorecards use), sitting alongside the trained ML model rather than
+  // replacing it.
+  const computeCompositeScore = (record) => {
+    let weightedSum = 0;
+    let totalWeight = 0;
+    featureWeights.forEach(f => {
+      const raw = Number(record[f.key]);
+      if (isNaN(raw)) return;
+      const [lo, hi] = f.range;
+      let normalized = (raw - lo) / (hi - lo); // 0-1
+      normalized = Math.max(0, Math.min(1, normalized));
+      if (f.direction === -1) normalized = 1 - normalized; // flip so higher = more risk
+      weightedSum += normalized * f.weight;
+      totalWeight += f.weight;
+    });
+    return totalWeight > 0 ? Math.round((weightedSum / totalWeight) * 100) : 0;
+  };
 
   useEffect(() => { onRowsChange?.(rows); }, [rows]);
   useEffect(() => { onScoredChange?.(scored); }, [scored]);
@@ -1038,7 +1077,13 @@ function ScoringTab({ onRowsChange, onScoredChange }) {
         if (!Array.isArray(data.scored)) {
           throw new Error(`Batch ${i + 1}/${batches.length} returned an unexpected response shape: ${JSON.stringify(data).slice(0, 200)}`);
         }
-        allScored.push(...data.scored);
+        // Attach the original raw row (by customer_id) to each scored result —
+        // score.js only returns the churn/upsell probabilities, but the
+        // composite weight tuner below needs the raw feature values too.
+        const batchRecordsById = {};
+        batches[i].forEach(r => { batchRecordsById[r.customer_id] = r; });
+        const enriched = data.scored.map(s => ({ ...s, record: batchRecordsById[s.customer_id] || {} }));
+        allScored.push(...enriched);
       }
       setScored(allScored);
     } catch (err) {
@@ -1051,6 +1096,7 @@ function ScoringTab({ onRowsChange, onScoredChange }) {
 
   const sortedScored = scored ? [...scored].sort((a, b) => {
     if (sortBy === "churn") return b.churn.churnProbability - a.churn.churnProbability;
+    if (sortBy === "composite") return computeCompositeScore(b.record) - computeCompositeScore(a.record);
     const bestB = Math.max(...Object.values(b.upsell).map(u => u.probability));
     const bestA = Math.max(...Object.values(a.upsell).map(u => u.probability));
     return bestB - bestA;
@@ -1060,7 +1106,7 @@ function ScoringTab({ onRowsChange, onScoredChange }) {
     <div>
       <p style={{ fontSize: 13, color: "var(--color-text-secondary)", marginBottom: "1.25rem" }}>
         Upload a real customer export (Salesforce-style CSV) and score every row against the
-        <strong> real, pre-trained Random Forest models</strong> — churn risk and per-product upsell
+        <strong> real, pre-trained Gradient Boosting models</strong> — churn risk and per-product upsell
         propensity. No LLM is involved in this scoring step; it's deterministic model inference.
       </p>
 
@@ -1081,15 +1127,53 @@ function ScoringTab({ onRowsChange, onScoredChange }) {
         </p>
       </div>
 
-      {rows.length > 0 && (
-        <button onClick={runScoring} disabled={isScoring} style={{
-          padding: "0.7rem 1.6rem", fontSize: 13, fontWeight: 600, fontFamily: "inherit",
-          background: isScoring ? "var(--color-bg-secondary)" : "#0C1929",
-          color: isScoring ? "var(--color-text-tertiary)" : "white",
-          border: "none", borderRadius: "var(--border-radius-md)", cursor: "pointer", marginBottom: "1.25rem",
+      <div style={{ display: "flex", gap: 10, marginBottom: showWeights ? 12 : "1.25rem", alignItems: "center", flexWrap: "wrap" }}>
+        {rows.length > 0 && (
+          <button onClick={runScoring} disabled={isScoring} style={{
+            padding: "0.7rem 1.6rem", fontSize: 13, fontWeight: 600, fontFamily: "inherit",
+            background: isScoring ? "var(--color-bg-secondary)" : "#0C1929",
+            color: isScoring ? "var(--color-text-tertiary)" : "white",
+            border: "none", borderRadius: "var(--border-radius-md)", cursor: "pointer",
+          }}>
+            {isScoring ? (scoringProgress || "Scoring with Gradient Boosting models…") : `Score ${rows.length} Customers →`}
+          </button>
+        )}
+        <button onClick={() => setShowWeights(!showWeights)} style={{
+          padding: "0.7rem 1.2rem", fontSize: 12, fontWeight: 600, fontFamily: "inherit",
+          background: "none", color: "var(--color-text-secondary)",
+          border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-md)", cursor: "pointer",
         }}>
-          {isScoring ? (scoringProgress || "Scoring with Random Forest models…") : `Score ${rows.length} Customers →`}
+          {showWeights ? "Hide" : "⚙ Tune"} Feature Weights
         </button>
+      </div>
+
+      {showWeights && (
+        <div style={{
+          background: "var(--color-bg-primary)", border: "0.5px solid var(--color-border-tertiary)",
+          borderRadius: "var(--border-radius-lg)", padding: "1rem 1.25rem", marginBottom: "1.25rem",
+        }}>
+          <p style={{ fontSize: 12, color: "var(--color-text-secondary)", margin: "0 0 4px", lineHeight: 1.5 }}>
+            The <strong>Gradient Boosting churn score</strong> is a real trained model — its logic isn't manually
+            adjustable, since it learned these patterns from data. What you CAN tune below is a separate,
+            transparent <strong>Composite Risk Score</strong>: a weighted business rule (same pattern as Gainsight's
+            configurable health scores) that sits alongside the ML model, not inside it.
+          </p>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem 1.5rem", marginTop: 12 }}>
+            {featureWeights.map(f => (
+              <div key={f.key}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--color-text-secondary)", marginBottom: 2 }}>
+                  <span>{f.label}</span>
+                  <span style={{ fontWeight: 600, color: "var(--color-text-primary)" }}>{f.weight.toFixed(1)}×</span>
+                </div>
+                <input
+                  type="range" min="0" max="3" step="0.1" value={f.weight}
+                  onChange={(e) => updateWeight(f.key, parseFloat(e.target.value))}
+                  style={{ width: "100%" }}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
       )}
 
       {error && (
@@ -1113,6 +1197,11 @@ function ScoringTab({ onRowsChange, onScoredChange }) {
                 background: sortBy === "upsell" ? "#0C1929" : "var(--color-bg-secondary)",
                 color: sortBy === "upsell" ? "white" : "var(--color-text-secondary)", border: "none",
               }}>Sort: Best upsell</button>
+              <button onClick={() => setSortBy("composite")} style={{
+                fontSize: 11, padding: "3px 10px", borderRadius: 4, cursor: "pointer", fontFamily: "inherit",
+                background: sortBy === "composite" ? "#0C1929" : "var(--color-bg-secondary)",
+                color: sortBy === "composite" ? "white" : "var(--color-text-secondary)", border: "none",
+              }}>Sort: Composite (tuned)</button>
             </div>
           </div>
           <div style={{ maxHeight: 520, overflowY: "auto" }}>
@@ -1120,7 +1209,8 @@ function ScoringTab({ onRowsChange, onScoredChange }) {
               <thead>
                 <tr style={{ background: "var(--color-bg-secondary)", position: "sticky", top: 0 }}>
                   <th style={{ textAlign: "left", padding: "6px 10px" }}>Customer</th>
-                  <th style={{ textAlign: "right", padding: "6px 10px" }}>Churn Risk</th>
+                  <th style={{ textAlign: "right", padding: "6px 10px" }}>Churn Risk (GBM model)</th>
+                  <th style={{ textAlign: "right", padding: "6px 10px" }}>Composite (tuned)</th>
                   <th style={{ textAlign: "left", padding: "6px 10px" }}>Top Upsell Targets</th>
                   <th style={{ textAlign: "left", padding: "6px 10px" }}>Recommended Action</th>
                 </tr>
@@ -1129,11 +1219,14 @@ function ScoringTab({ onRowsChange, onScoredChange }) {
                 {sortedScored.map((c) => {
                   const upsellSorted = Object.entries(c.upsell).sort((a, b) => b[1].probability - a[1].probability).slice(0, 3);
                   const churnColor = c.churn.churnProbability >= 60 ? "#993C1D" : c.churn.churnProbability >= 35 ? "#854F0B" : "#0F6E56";
+                  const composite = computeCompositeScore(c.record);
+                  const compositeColor = composite >= 60 ? "#993C1D" : composite >= 35 ? "#854F0B" : "#0F6E56";
                   const actions = getRecommendedActions(c);
                   return (
                     <tr key={c.customer_id} style={{ borderBottom: "0.5px solid var(--color-border-tertiary)" }}>
                       <td style={{ padding: "7px 10px", fontWeight: 500 }}>{c.company_name}</td>
                       <td style={{ padding: "7px 10px", textAlign: "right", color: churnColor, fontWeight: 600 }}>{c.churn.churnProbability}%</td>
+                      <td style={{ padding: "7px 10px", textAlign: "right", color: compositeColor, fontWeight: 600 }}>{composite}</td>
                       <td style={{ padding: "7px 10px" }}>
                         {upsellSorted.map(([product, d]) => (
                           <span key={product} style={{
